@@ -11,7 +11,7 @@ import bpy
 from bpy.app.handlers import persistent
 
 from bpy.types import Panel, Operator, PropertyGroup
-from bpy.props import StringProperty, CollectionProperty, BoolProperty, IntProperty
+from bpy.props import StringProperty, CollectionProperty, BoolProperty, IntProperty, EnumProperty
 import os
 import json
 
@@ -75,6 +75,17 @@ class CacheService:
     def get_cached_character_list(self):
         cache = self.get_cache()
         return cache.get(QUICKSPAWN_CHARACTERLIST, [])
+    
+    # also we should save the import mode
+    def cache_quickspawn_settings(self, import_mode):
+        cache = self.get_cache()
+        cache['quickspawn_import_mode'] = import_mode
+        self.write_to_blender_cache(cache)
+    
+    # get the cached import mode
+    def get_cached_quickspawn_settings(self):
+        cache = self.get_cache()
+        return cache.get('quickspawn_import_mode', 'APPEND')  # append default
 
 # class containing relevant details for storing the category
 class CATEGORY_PG_category(PropertyGroup):
@@ -92,6 +103,7 @@ class CHARACTER_PG_character(PropertyGroup):
 class CATEGORY_OT_add_category(Operator):
     bl_idname = "category.add_category"
     bl_label = "Add Category"
+    bl_description = "Add a category"
     
     # name of the category
     name: StringProperty(name="Category Name")
@@ -110,6 +122,11 @@ class CATEGORY_OT_add_category(Operator):
 
     # main functionality of operator. called after any user confirmations. ALL operators need execute. it returns FINISHED
     def execute(self, context):
+        # note do we want to allow dupe categories?
+        if any(category.name.lower() == self.name.lower() for category in context.scene.category_list):
+            self.report({'ERROR'}, f"Category '{self.name}' already exists.")
+            return {'CANCELLED'}
+        
         category = context.scene.category_list.add()
         category.name = self.name
         context.area.tag_redraw()
@@ -117,13 +134,14 @@ class CATEGORY_OT_add_category(Operator):
         # Cache updated category list with new category
         CacheService().cache_category_list(context.scene.category_list)
         
+        self.report({'INFO'}, f"Added category: {self.name}")
         return {'FINISHED'}
 
 # are you sure you want to remove category (and characters)?
 class CATEGORY_OT_remove_category(Operator):
     bl_idname = "category.remove_category"
     bl_label = "Remove Category"
-    
+    bl_description = "Remove a category and all its collections"
     # index of category to remove, passed in by the ui
     index: IntProperty()
 
@@ -155,6 +173,7 @@ class CATEGORY_OT_remove_category(Operator):
 class CHARACTER_OT_add_character(Operator):
     bl_idname = "character.add_character"
     bl_label = "Add Character"
+    bl_description = "Add a collection to this category"
     
     filepath: bpy.props.StringProperty()
     directory: bpy.props.StringProperty()
@@ -170,6 +189,12 @@ class CHARACTER_OT_add_character(Operator):
     category: StringProperty(name="Category")
 
     def execute(self, context):
+        # note do we want to allow dupe characters? assume characters coll names are unique
+        if any(char.collection.lower() == self.filename.lower() and char.category == self.category 
+               for char in context.scene.character_list):
+            self.report({'ERROR'}, f"Collection '{self.filename}' already exists in category '{self.category}'.")
+            return {'CANCELLED'}
+
         character = context.scene.character_list.add()
         character.name = os.path.basename(self.filepath)
         character.filepath = self.directory
@@ -180,7 +205,7 @@ class CHARACTER_OT_add_character(Operator):
         
         # Cache updated character list with new character
         CacheService().cache_character_list(context.scene.character_list)
-        
+        self.report({'INFO'}, f"Added {self.filename} to {self.category}")
         return {'FINISHED'}
     
     def invoke(self, context, event):
@@ -198,8 +223,8 @@ class CHARACTER_OT_add_character(Operator):
 # are you sure you want to remove character?
 class CHARACTER_OT_remove_character(Operator):
     bl_idname = "character.remove_character"
-    bl_label = "Remove Character"
-    
+    bl_label = "Remove Collection"
+    bl_description = "Remove a collection from this category"
     index: IntProperty()
 
     def execute(self, context):
@@ -214,43 +239,30 @@ class CHARACTER_OT_remove_character(Operator):
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
 
-# handles importing; including pop up to pick action
+# handles importing; one press importing
 class CHARACTER_OT_import_character(Operator):
     bl_idname = "character.import_character"
     bl_label = "Import Character"
     bl_options = {'INTERNAL'}
+    bl_description = "Import this collection"
 
     index: bpy.props.IntProperty()
-    action: bpy.props.EnumProperty(
-        items=[
-            ('APPEND', "Append", "Append the character to the scene"),
-            ('LINK', "Link", "Link the character to the scene"),
-        ],
-        name="Action",
-        description="Choose whether to append or link the character",
-        default='APPEND'
-    )
 
     # prompts the user if they want append or link, then does action
     def execute(self, context):
         character = context.scene.character_list[self.index]
         
-        if self.action == 'APPEND':
-        # USER SELECTED TO APPEND THE CHARACTER
+        if context.scene.quickspawn_import_mode == 'APPEND':
+            # APPEND THE CHARACTER
             bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
-            self.report({'INFO'}, f"Appended character: {character.name}")
+            self.report({'INFO'}, f"Appended collection: {character.name}")
         else:
-        # USER SELECTED TO LINK THE CHARACTER
-            self.report({'WARNING'}, "Link functionality not implemented yet")
+            # LINK THE CHARACTER
+            bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
+            self.report({'INFO'}, f"Linked collection: {character.name}")
         
         return {'FINISHED'}
 
-    def invoke(self, context, event):
-        return context.window_manager.invoke_props_dialog(self)
-
-    def draw(self, context):
-        layout = self.layout
-        layout.prop(self, "action", expand=True)
 
 # drop down control thx cgpt
 class CATEGORY_OT_toggle_expand(Operator):
@@ -281,8 +293,15 @@ class CHARACTER_PT_panel(Panel):
 
         print(f"Drawing panel. Category count: {len(scene.category_list)}, Character count: {len(scene.character_list)}")
 
+        
         row = layout.row()
-        row.operator("category.add_category", text="Add Category")
+        row.label(text="Import Mode")
+        row.prop(scene, "quickspawn_import_mode", expand=True, text="Import Mode")
+
+        row = layout.row()
+        row.operator("category.add_category", text="Add Category", icon='ADD')
+
+        layout.separator()
         
         for catNum, category in enumerate(scene.category_list):
             print(f"Drawing category: {category.name}")
@@ -295,7 +314,7 @@ class CHARACTER_PT_panel(Panel):
             
             if category.is_expanded:
                 row = box.row()
-                op = row.operator("character.add_character", text="Add Character")
+                op = row.operator("character.add_character", text="Add Collection", icon='COLLECTION_NEW')
                 op.category = category.name
                 
                 sorted_characters = sorted(
@@ -308,7 +327,7 @@ class CHARACTER_PT_panel(Panel):
                     row = box.row()
                     op = row.operator("character.import_character", text=character.collection)
                     op.index = scene.character_list.find(character.name)
-                    row.operator("character.remove_character", text="", icon='X').index = scene.character_list.find(character.name)
+                    row.operator("character.remove_character", text="", icon='TRASH').index = scene.character_list.find(character.name)
 
         print("Finished drawing panel")
 
@@ -325,6 +344,9 @@ classes = (
     CHARACTER_PT_panel,
     CATEGORY_OT_toggle_expand,
 )
+# change between append and link
+def import_mode_update(self, context):
+    CacheService().cache_quickspawn_settings(self.quickspawn_import_mode)
 
 # done whenever add on is installed
 def register():
@@ -334,6 +356,16 @@ def register():
 
     bpy.types.Scene.character_list = CollectionProperty(type=CHARACTER_PG_character)
     bpy.types.Scene.category_list = CollectionProperty(type=CATEGORY_PG_category)
+
+    bpy.types.Scene.quickspawn_import_mode = EnumProperty(
+        name="Import Mode",
+        items=[
+            ('APPEND', "Append", "Append the collection to the scene"),
+            ('LINK', "Link", "Link the collection to the scene")
+        ],
+        default=CacheService().get_cached_quickspawn_settings(),
+        update=import_mode_update
+    )
 
     # check for cache, if not found, create it
     cache_service = CacheService()
@@ -353,6 +385,7 @@ def unregister():
 
     del bpy.types.Scene.character_list
     del bpy.types.Scene.category_list
+    del bpy.types.Scene.quickspawn_import_mode
 
     for clas in reversed(classes):
         bpy.utils.unregister_class(clas)
