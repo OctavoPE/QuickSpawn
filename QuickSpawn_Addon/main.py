@@ -8,10 +8,73 @@ bl_info = {
 }
 
 import bpy
+from bpy.app.handlers import persistent
 
 from bpy.types import Panel, Operator, PropertyGroup
 from bpy.props import StringProperty, CollectionProperty, BoolProperty, IntProperty
 import os
+import json
+
+# Thanks to mken for helping me with persisting data across sessions
+BLENDER_ADDON_CONFIG_FILENAME = f'quickspawn.json'
+BLENDER_ADDON_CONFIG_FILEPATH = os.path.join(bpy.utils.user_resource('CONFIG'), BLENDER_ADDON_CONFIG_FILENAME)
+
+QUICKSPAWN_CATEGORYLIST = "quickspawn_categorylist"
+QUICKSPAWN_CHARACTERLIST = "quickspawn_characterlist"
+
+class CacheService:
+    # read from cache
+    def read_from_blender_cache(self):
+        try:
+            with open(BLENDER_ADDON_CONFIG_FILEPATH, 'r') as file:
+                print(f"Reading from {BLENDER_ADDON_CONFIG_FILEPATH}")
+                config = json.load(file)
+                print(f"Config: {config}")
+                return config
+        except Exception as e:
+            print(f"Error reading from {BLENDER_ADDON_CONFIG_FILEPATH}: {e}")
+            return {}
+    # attempt to find out if cachce exists
+    def get_cache(self, cache_enabled=True):
+        if not cache_enabled:
+            return {}
+        return self.read_from_blender_cache()
+    # if it doesnt lets make it
+    def write_to_blender_cache(self, config):
+        with open(BLENDER_ADDON_CONFIG_FILEPATH, 'w') as file:
+            print(f"Writing to {BLENDER_ADDON_CONFIG_FILEPATH}")
+            json_str = json.dumps(config, indent=4)
+            file.write(json_str)
+            print(f"Wrote to {BLENDER_ADDON_CONFIG_FILEPATH}")
+    # fired whenever category list is updated - added, removed, etc
+    def cache_category_list(self, category_list):
+        cache = self.get_cache()
+        cache[QUICKSPAWN_CATEGORYLIST] = [
+            {"name": category.name, "is_expanded": category.is_expanded}
+            for category in category_list
+        ]
+        self.write_to_blender_cache(cache)
+    # fired whenever character list is updated - added, removed, etc
+    def cache_character_list(self, character_list):
+        cache = self.get_cache()
+        cache[QUICKSPAWN_CHARACTERLIST] = [
+            {
+                "name": character.name,
+                "filepath": character.filepath,
+                "collection": character.collection,
+                "category": character.category
+            }
+            for character in character_list
+        ]
+        self.write_to_blender_cache(cache)
+    # get the cached category list
+    def get_cached_category_list(self):
+        cache = self.get_cache()
+        return cache.get(QUICKSPAWN_CATEGORYLIST, [])
+    # get the cached character list
+    def get_cached_character_list(self):
+        cache = self.get_cache()
+        return cache.get(QUICKSPAWN_CHARACTERLIST, [])
 
 # class containing relevant details for storing the category
 class CATEGORY_PG_category(PropertyGroup):
@@ -50,6 +113,10 @@ class CATEGORY_OT_add_category(Operator):
         category = context.scene.category_list.add()
         category.name = self.name
         context.area.tag_redraw()
+        
+        # Cache updated category list with new category
+        CacheService().cache_category_list(context.scene.category_list)
+        
         return {'FINISHED'}
 
 # are you sure you want to remove category (and characters)?
@@ -62,8 +129,22 @@ class CATEGORY_OT_remove_category(Operator):
 
     # only called when user confirms; blender logic handles this. (based on invoke's return value)
     def execute(self, context):
+        category_name = context.scene.category_list[self.index].name
+
         context.scene.category_list.remove(self.index)
         context.area.tag_redraw()
+        
+        # Cache updated category list
+        CacheService().cache_category_list(context.scene.category_list)
+        
+        # Remove characters in this category using the stored name
+        characters_to_remove = [char for char in context.scene.character_list if char.category == category_name]
+        for char in characters_to_remove:
+            context.scene.character_list.remove(context.scene.character_list.find(char.name))
+        
+        # Cache updated character list with removed category
+        CacheService().cache_character_list(context.scene.character_list)
+        
         return {'FINISHED'}
 
     # asks user for confirmation
@@ -96,6 +177,10 @@ class CHARACTER_OT_add_character(Operator):
         character.category = self.category
         # forces ui update: WITHOUT THIS, UI DOESNT UPDATE UNTIL YOU MOVE YOUR MOUSE
         context.area.tag_redraw()
+        
+        # Cache updated character list with new character
+        CacheService().cache_character_list(context.scene.character_list)
+        
         return {'FINISHED'}
     
     def invoke(self, context, event):
@@ -120,10 +205,14 @@ class CHARACTER_OT_remove_character(Operator):
     def execute(self, context):
         context.scene.character_list.remove(self.index)
         context.area.tag_redraw()
+        
+        # Cache updated character list with deleted character
+        CacheService().cache_character_list(context.scene.character_list)
+        
         return {'FINISHED'}
 
     def invoke(self, context, event):
-        return context.window_manager.invoke_confirm(self,event)
+        return context.window_manager.invoke_confirm(self, event)
 
 # handles importing; including pop up to pick action
 class CHARACTER_OT_import_character(Operator):
@@ -149,7 +238,7 @@ class CHARACTER_OT_import_character(Operator):
         if self.action == 'APPEND':
         # USER SELECTED TO APPEND THE CHARACTER
             bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
-            self.report({'INFO'}, f"Appended character: {character.name} full path: {character.filepath} collection name: {character.collection}")
+            self.report({'INFO'}, f"Appended character: {character.name}")
         else:
         # USER SELECTED TO LINK THE CHARACTER
             self.report({'WARNING'}, "Link functionality not implemented yet")
@@ -173,6 +262,9 @@ class CATEGORY_OT_toggle_expand(Operator):
     def execute(self, context):
         category = context.scene.category_list[self.index]
         category.is_expanded = not category.is_expanded
+
+        # forgot to cache this, stays collapsed on blender relaunch
+        CacheService().cache_category_list(context.scene.category_list)
         return {'FINISHED'}
 
 # The main panel
@@ -187,19 +279,20 @@ class CHARACTER_PT_panel(Panel):
         layout = self.layout
         scene = context.scene
 
+        print(f"Drawing panel. Category count: {len(scene.category_list)}, Character count: {len(scene.character_list)}")
+
         row = layout.row()
         row.operator("category.add_category", text="Add Category")
         
         for catNum, category in enumerate(scene.category_list):
+            print(f"Drawing category: {category.name}")
             box = layout.box()
             row = box.row()
-            # do we want different icons for categories?
             expand_ico = 'TRIA_DOWN' if category.is_expanded else 'TRIA_RIGHT'
-            row.operator("category.toggle_expand", text="", icon=expand_ico, emboss=False).index = catNum # pass in index of category to toggle to the operator
+            row.operator("category.toggle_expand", text="", icon=expand_ico, emboss=False).index = catNum
             row.label(text=category.name)
-            row.operator("category.remove_category", text="", icon='X').index = catNum # pass in index of category to remove to the operator
+            row.operator("category.remove_category", text="", icon='X').index = catNum
             
-            # only when extended?
             if category.is_expanded:
                 row = box.row()
                 op = row.operator("character.add_character", text="Add Character")
@@ -207,15 +300,17 @@ class CHARACTER_PT_panel(Panel):
                 
                 sorted_characters = sorted(
                     [char for char in scene.character_list if char.category == category.name],
-                    key=lambda x: x.collection.lower() # put in alphabetical order, thanks cgpt
+                    key=lambda x: x.collection.lower()
                 )
+                print(f"Characters in {category.name}: {[char.name for char in sorted_characters]}")
                 
                 for character in sorted_characters:
                     row = box.row()
                     op = row.operator("character.import_character", text=character.collection)
-                    # find that char and import them
                     op.index = scene.character_list.find(character.name)
-                    row.operator("character.remove_character", text="", icon='X').index = scene.character_list.find(character.name) # pass in index of character to remove to the operator
+                    row.operator("character.remove_character", text="", icon='X').index = scene.character_list.find(character.name)
+
+        print("Finished drawing panel")
 
 
 # list of the classes to register
@@ -233,20 +328,70 @@ classes = (
 
 # done whenever add on is installed
 def register():
+    print("Registering QuickSpawn addon")
     for clas in classes:
         bpy.utils.register_class(clas)
 
-    # list of characters and categories
     bpy.types.Scene.character_list = CollectionProperty(type=CHARACTER_PG_character)
     bpy.types.Scene.category_list = CollectionProperty(type=CATEGORY_PG_category)
 
-# done whenever removing addon
+    # check for cache, if not found, create it
+    cache_service = CacheService()
+    if not cache_service.get_cache():
+        # default empty stuff
+        cache_service.write_to_blender_cache({QUICKSPAWN_CATEGORYLIST: [], QUICKSPAWN_CHARACTERLIST: []})
+
+    # Register load handler (only if not already registered)
+    if load_quickspawn_data not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(load_quickspawn_data)
+
 def unregister():
+    print("Unregistering QuickSpawn addon")
+    # Unregister load handler
+    if load_quickspawn_data in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(load_quickspawn_data)
+
     del bpy.types.Scene.character_list
     del bpy.types.Scene.category_list
 
     for clas in reversed(classes):
         bpy.utils.unregister_class(clas)
 
+
 if __name__ == "__main__":
     register()
+
+# this is called when the file is loaded: from the cache, write the data to the scene's lists
+@persistent
+def load_quickspawn_data(dummy):
+    print("Starting load_quickspawn_data")
+    cache_service = CacheService()
+    
+    # Clear OLD!
+    bpy.context.scene.category_list.clear()
+    bpy.context.scene.character_list.clear()
+    print(f"Cleared lists. Category count: {len(bpy.context.scene.category_list)}, Character count: {len(bpy.context.scene.character_list)}")
+    
+    # Load categories
+    cached_categories = cache_service.get_cached_category_list()
+    print(f"Cached categories: {cached_categories}")
+    for cat_data in cached_categories:
+        category = bpy.context.scene.category_list.add()
+        category.name = cat_data["name"]
+        category.is_expanded = cat_data["is_expanded"]
+        print(f"Added category: {category.name}")
+    
+    # Load characters
+    cached_characters = cache_service.get_cached_character_list()
+    print(f"Cached characters: {cached_characters}")
+    for char_data in cached_characters:
+        character = bpy.context.scene.character_list.add()
+        character.name = char_data["name"]
+        character.filepath = char_data["filepath"]
+        character.collection = char_data["collection"]
+        character.category = char_data["category"]
+        print(f"Added character: {character.name} in category {character.category}")
+
+    print(f"Final counts - Categories: {len(bpy.context.scene.category_list)}, Characters: {len(bpy.context.scene.character_list)}")
+    print("Finished load_quickspawn_data")
+
