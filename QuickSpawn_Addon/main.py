@@ -248,20 +248,82 @@ class CHARACTER_OT_import_character(Operator):
 
     index: bpy.props.IntProperty()
 
-    # prompts the user if they want append or link, then does action
     def execute(self, context):
         character = context.scene.character_list[self.index]
         
+        initial_colls = set(bpy.data.collections)
+        
         if context.scene.quickspawn_import_mode == 'APPEND':
-            # APPEND THE CHARACTER
             bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
-            self.report({'INFO'}, f"Appended collection: {character.name}")
+            action = "Appended"
         else:
-            # LINK THE CHARACTER
             bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
-            self.report({'INFO'}, f"Linked collection: {character.name}")
+            action = "Linked"
+        
+        new_colls = set(bpy.data.collections) - initial_colls
+        
+        is_character = False
+        new_armature = None
+        
+        # identify if the collection we just added is a character
+        for new_collection in new_colls:
+            for obj in new_collection.objects:
+                if obj.type == 'ARMATURE' and "metarig" not in obj.name.lower():
+                    is_character = True
+                    # we only care about armatures that are not named metarig
+                    print(f"Found armature: {obj.name}")
+                    new_armature = obj
+                    
+                    break
+            if is_character:
+                break
+
+        if is_character and context.scene.quickspawn_import_mode == 'LINK':
+            # add library override to the armature
+            bpy.ops.object.make_override_library()
+
+
+        if is_character:
+            self.report({'INFO'}, f"{action} character: {character.name}.")
+            # Perform character-specific operations here
+            self.process_character(new_armature, new_collection)
+        else:
+            self.report({'INFO'}, f"{action} collection: {character.name}")
         
         return {'FINISHED'}
+    
+    # lel same code from setup addon
+    def searchForLayerCollection(self, layerColl, coll_name):
+        found = None
+        if (layerColl.name == coll_name):
+            return layerColl
+        for layer in layerColl.children:
+            found = self.searchForLayerCollection(layer, coll_name)
+            if found:
+                return found
+
+    def disable_collection(self, collection_name):
+        view_layer_collection = bpy.context.view_layer.layer_collection
+
+        layer_collection_to_disable = self.searchForLayerCollection(view_layer_collection, collection_name)
+        if layer_collection_to_disable:
+            layer_collection_to_disable.exclude = True
+            return True
+        return False
+
+    # after we identify the character, we can do some processing
+    def process_character(self, armature, collection):
+        # if existing, close the wgt collection
+        # within the collection, there is a COLLECTION possibly named wgt or wgts we need to disable it
+        for obj in collection.children:
+            if "wgt" in obj.name.lower() or "wgts" in obj.name.lower():
+                print(f"Disabling collection: {obj.name}")
+                self.disable_collection(obj.name)
+
+        
+        self.report({'INFO'}, f"Processed character: {armature}")
+
+
 
 
 # drop down control thx cgpt
