@@ -252,6 +252,8 @@ class CHARACTER_OT_import_character(Operator):
         character = context.scene.character_list[self.index]
         
         initial_colls = set(bpy.data.collections)
+        initial_texts = set(bpy.data.texts)
+        initial_armatures = set(bpy.data.armatures)
         
         if context.scene.quickspawn_import_mode == 'APPEND':
             bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
@@ -261,9 +263,11 @@ class CHARACTER_OT_import_character(Operator):
             action = "Linked"
         
         new_colls = set(bpy.data.collections) - initial_colls
+        new_texts = set(bpy.data.texts) - initial_texts
+        new_armatures = set(bpy.data.armatures) - initial_armatures
         
         is_character = False
-        new_armature = None
+        rig_object = None
         
         # identify if the collection we just added is a character
         for new_collection in new_colls:
@@ -272,7 +276,7 @@ class CHARACTER_OT_import_character(Operator):
                     is_character = True
                     # we only care about armatures that are not named metarig
                     print(f"Found armature: {obj.name}")
-                    new_armature = obj
+                    rig_object = obj
                     
                     break
             if is_character:
@@ -286,7 +290,7 @@ class CHARACTER_OT_import_character(Operator):
         if is_character:
             self.report({'INFO'}, f"{action} character: {character.name}.")
             # Perform character-specific operations here
-            self.process_character(new_armature, new_collection)
+            self.process_character(rig_object, new_collection, new_texts, new_armatures)
         else:
             self.report({'INFO'}, f"{action} collection: {character.name}")
         
@@ -312,7 +316,7 @@ class CHARACTER_OT_import_character(Operator):
         return False
 
     # after we identify the character, we can do some processing
-    def process_character(self, armature, collection):
+    def process_character(self, rig_object, collection, texts, armatures):
         # if existing, close the wgt collection
         # within the collection, there is a COLLECTION possibly named wgt or wgts we need to disable it
         for obj in collection.children:
@@ -320,8 +324,49 @@ class CHARACTER_OT_import_character(Operator):
                 print(f"Disabling collection: {obj.name}")
                 self.disable_collection(obj.name)
 
+        # logic to identify and run the correct rig script
+        script_file = None
+
+        for text in texts:
+            if "_ui.py" in text.name:
+                script_file = text
+                print(f"Found rig script: {script_file.name}")
+                break
         
-        self.report({'INFO'}, f"Processed character: {armature}")
+        if script_file:
+            char_armature = None
+            for armature in armatures:
+                # if armature name doesn't have metarig in it, we can assume it's the character
+                if "metarig" not in armature.name.lower():
+                    char_armature = armature
+                    break
+
+            try:
+                # this allows us to handle duplicate armature names, that way, the rig layers can be present for duplicated characters
+                # every char should just have a unique id; this needs to especially be true for duplicate characters.
+                random_id = hash(char_armature.name.lower().replace(" ", "_")) 
+                
+                bpy.data.armatures[char_armature.name]["rig_id"] = str(random_id)
+
+                script_text = script_file.as_string()
+                script_text = script_text.replace(char_armature.name.split(".")[0], char_armature.name)
+
+                rig_char_id = script_text.split("rig_id = \"")[1].split("\"")[0]
+                script_text = script_text.replace(rig_char_id, str(random_id))
+
+
+                script_file.clear()
+                script_file.write(script_text)
+
+                ctx = bpy.context.copy()
+                ctx['edit_text'] = script_file
+                with bpy.context.temp_override(**ctx):
+                    bpy.ops.text.run_script()
+            except:
+                pass
+
+        
+        self.report({'INFO'}, f"Processed character: {rig_object}")
 
 
 
