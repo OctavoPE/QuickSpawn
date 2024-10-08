@@ -247,7 +247,8 @@ class CHARACTER_OT_import_character(Operator):
     bl_description = "Import this collection"
 
     index: bpy.props.IntProperty()
-
+ 
+    
     def execute(self, context):
         character = context.scene.character_list[self.index]
         
@@ -256,15 +257,28 @@ class CHARACTER_OT_import_character(Operator):
         initial_armatures = set(bpy.data.armatures)
         
         if context.scene.quickspawn_import_mode == 'APPEND':
-            bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
-            action = "Appended"
+            # User is appending given collection
+            try:
+                bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
+                action = "Appended"
+            except:
+                self.report({'ERROR'}, "Could not append collection")
         else:
-            bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
+            # User is linking given collection. Additionally, it's made a library override.
+            try:
+                bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
+            except:
+                self.report({'ERROR'}, "Could not link collection")
+            try:
+                bpy.ops.object.make_override_library()
+            except:
+                self.report({'ERROR'}, "Could not make linked collection library override")
+
             action = "Linked"
         
         new_colls = set(bpy.data.collections) - initial_colls
         new_texts = set(bpy.data.texts) - initial_texts
-        new_armatures = set(bpy.data.armatures) - initial_armatures
+        new_armatures = set(bpy.data.armatures) - initial_armatures       
         
         is_character = False
         rig_object = None
@@ -275,22 +289,17 @@ class CHARACTER_OT_import_character(Operator):
                 if obj.type == 'ARMATURE' and "metarig" not in obj.name.lower():
                     is_character = True
                     # we only care about armatures that are not named metarig
-                    print(f"Found armature: {obj.name}")
+                    print(f"Found rig object: {obj.name}. Is Character.")
                     rig_object = obj
                     
                     break
             if is_character:
                 break
 
-        if is_character and context.scene.quickspawn_import_mode == 'LINK':
-            # add library override to the armature
-            bpy.ops.object.make_override_library()
-
-
         if is_character:
             self.report({'INFO'}, f"{action} character: {character.name}.")
             # Perform character-specific operations here
-            self.process_character(rig_object, new_collection, new_texts, new_armatures)
+            self.process_character(rig_object, new_collection, new_texts, new_armatures, action, initial_texts)
         else:
             self.report({'INFO'}, f"{action} collection: {character.name}")
         
@@ -316,7 +325,7 @@ class CHARACTER_OT_import_character(Operator):
         return False
 
     # after we identify the character, we can do some processing
-    def process_character(self, rig_object, collection, texts, armatures):
+    def process_character(self, rig_object, collection, texts, armatures, action_name, initial_texts):
         # if existing, close the wgt collection
         # within the collection, there is a COLLECTION possibly named wgt or wgts we need to disable it
         for obj in collection.children:
@@ -324,35 +333,52 @@ class CHARACTER_OT_import_character(Operator):
                 print(f"Disabling collection: {obj.name}")
                 self.disable_collection(obj.name)
 
-        # logic to identify and run the correct rig script
-        script_file = None
-
-        for text in texts:
-            if "_ui.py" in text.name:
-                script_file = text
-                print(f"Found rig script: {script_file.name}")
+        # identify the armature
+        char_armature = None
+        for armature in armatures:
+            # if armature name doesn't have metarig in it, we can assume it's the character
+            if "metarig" not in armature.name.lower():
+                char_armature = armature
                 break
-        
-        if script_file:
-            char_armature = None
-            for armature in armatures:
-                # if armature name doesn't have metarig in it, we can assume it's the character
-                if "metarig" not in armature.name.lower():
-                    char_armature = armature
+
+        script_file = None
+        # if we have an armature, we can identify the rig script.
+        if char_armature:
+            for text in texts:
+                if "_ui.py" in text.name:
+                    if action_name == "Appended":
+                        script_file = text
+                    elif action_name == "Linked":
+                        new_text = bpy.data.texts.new(char_armature.name+"_ui.py")
+                        new_text.write(text.as_string())
+                        script_file = new_text
+                        script_file.use_module = True
+
                     break
 
+        # If linking duplicate characters, this is the case below. 
+        if len(texts) == 0 and action_name == "Linked" and char_armature:
+            new_text = bpy.data.texts.new(char_armature.name+"_ui.py")
+            original_text = bpy.data.texts.get(char_armature.name.split(".")[0]+"_ui.py")
+            new_text.write(original_text.as_string())
+            script_file = new_text
+            script_file.use_module = True # enables the text to be treated as a script - to be ran at .blend startup
+        
+        if script_file:
             try:
                 # this allows us to handle duplicate armature names, that way, the rig layers can be present for duplicated characters
                 # every char should just have a unique id; this needs to especially be true for duplicate characters.
-                random_id = hash(char_armature.name.lower().replace(" ", "_")) 
+                random_id = str(hash(char_armature.name.lower().replace(" ", ""))).replace("-", "")
                 
-                bpy.data.armatures[char_armature.name]["rig_id"] = str(random_id)
+                bpy.data.armatures[char_armature.name]["rig_id"] = random_id
+                
+                print(f"Generated new rig_id: {bpy.data.armatures[char_armature.name]['rig_id']}")
 
                 script_text = script_file.as_string()
                 script_text = script_text.replace(char_armature.name.split(".")[0], char_armature.name)
 
                 rig_char_id = script_text.split("rig_id = \"")[1].split("\"")[0]
-                script_text = script_text.replace(rig_char_id, str(random_id))
+                script_text = script_text.replace(rig_char_id, random_id)
 
 
                 script_file.clear()
@@ -362,11 +388,12 @@ class CHARACTER_OT_import_character(Operator):
                 ctx['edit_text'] = script_file
                 with bpy.context.temp_override(**ctx):
                     bpy.ops.text.run_script()
+
             except:
                 pass
 
         
-        self.report({'INFO'}, f"Processed character: {rig_object}")
+        self.report({'INFO'}, "Successfully setup character")
 
 
 
@@ -397,10 +424,7 @@ class CHARACTER_PT_panel(Panel):
     def draw(self, context):
         layout = self.layout
         scene = context.scene
-
-        print(f"Drawing panel. Category count: {len(scene.category_list)}, Character count: {len(scene.character_list)}")
-
-        
+       
         row = layout.row()
         row.label(text="Import Mode")
         row.prop(scene, "quickspawn_import_mode", expand=True, text="Import Mode")
@@ -411,7 +435,6 @@ class CHARACTER_PT_panel(Panel):
         layout.separator()
         
         for catNum, category in enumerate(scene.category_list):
-            print(f"Drawing category: {category.name}")
             box = layout.box()
             row = box.row()
             expand_ico = 'TRIA_DOWN' if category.is_expanded else 'TRIA_RIGHT'
@@ -428,7 +451,6 @@ class CHARACTER_PT_panel(Panel):
                     [char for char in scene.character_list if char.category == category.name],
                     key=lambda x: x.collection.lower()
                 )
-                print(f"Characters in {category.name}: {[char.name for char in sorted_characters]}")
                 
                 for character in sorted_characters:
                     row = box.row()
@@ -436,7 +458,6 @@ class CHARACTER_PT_panel(Panel):
                     op.index = scene.character_list.find(character.name)
                     row.operator("character.remove_character", text="", icon='TRASH').index = scene.character_list.find(character.name)
 
-        print("Finished drawing panel")
 
 
 # list of the classes to register
@@ -514,24 +535,19 @@ def load_quickspawn_data(dummy):
     
     # Load categories
     cached_categories = cache_service.get_cached_category_list()
-    print(f"Cached categories: {cached_categories}")
     for cat_data in cached_categories:
         category = bpy.context.scene.category_list.add()
         category.name = cat_data["name"]
         category.is_expanded = cat_data["is_expanded"]
-        print(f"Added category: {category.name}")
     
     # Load characters
     cached_characters = cache_service.get_cached_character_list()
-    print(f"Cached characters: {cached_characters}")
     for char_data in cached_characters:
         character = bpy.context.scene.character_list.add()
         character.name = char_data["name"]
         character.filepath = char_data["filepath"]
         character.collection = char_data["collection"]
         character.category = char_data["category"]
-        print(f"Added character: {character.name} in category {character.category}")
 
     print(f"Final counts - Categories: {len(bpy.context.scene.category_list)}, Characters: {len(bpy.context.scene.character_list)}")
-    print("Finished load_quickspawn_data")
 
