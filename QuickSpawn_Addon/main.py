@@ -358,11 +358,16 @@ class CHARACTER_OT_import_character(Operator):
 
         # If linking duplicate characters, this is the case below. 
         if len(texts) == 0 and action_name == "Linked" and char_armature:
-            new_text = bpy.data.texts.new(char_armature.name+"_ui.py")
-            original_text = bpy.data.texts.get(char_armature.name.split(".")[0]+"_ui.py")
-            new_text.write(original_text.as_string())
-            script_file = new_text
-            script_file.use_module = True # enables the text to be treated as a script - to be ran at .blend startup
+            try:
+                original_file = bpy.data.texts.get(char_armature.name.split(".")[0]+"_ui.py")
+                original_text = original_file.as_string()
+                
+                new_text = bpy.data.texts.new(char_armature.name+"_ui.py") 
+                new_text.write(original_text)
+                script_file = new_text
+                script_file.use_module = True # enables the text to be treated as a script - to be ran at .blend startup
+            except:
+                pass # if we get here, it's likely a rig with no corresponding rig script, in which case, just ignore.
         
         if script_file:
             try:
@@ -393,7 +398,7 @@ class CHARACTER_OT_import_character(Operator):
                 pass
 
         
-        self.report({'INFO'}, "Successfully setup character")
+        self.report({'INFO'}, "Setup successful")
 
 
 
