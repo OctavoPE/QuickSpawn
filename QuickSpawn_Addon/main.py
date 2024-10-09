@@ -142,30 +142,34 @@ class CATEGORY_OT_remove_category(Operator):
     bl_idname = "category.remove_category"
     bl_label = "Remove Category"
     bl_description = "Remove a category and all its collections"
-    # index of category to remove, passed in by the ui
     index: IntProperty()
 
     # only called when user confirms; blender logic handles this. (based on invoke's return value)
     def execute(self, context):
         category_name = context.scene.category_list[self.index].name
 
+        # Remove the category
         context.scene.category_list.remove(self.index)
-        context.area.tag_redraw()
         
-        # Cache updated category list
-        CacheService().cache_category_list(context.scene.category_list)
-        
-        # Remove characters in this category using the stored name
+        # Remove characters in this category
         characters_to_remove = [char for char in context.scene.character_list if char.category == category_name]
         for char in characters_to_remove:
             context.scene.character_list.remove(context.scene.character_list.find(char.name))
         
-        # Cache updated character list with removed category
-        CacheService().cache_character_list(context.scene.character_list)
+        # Update the cache
+        cache_service = CacheService()
         
+        # Update category list in cache
+        cache_service.cache_category_list(context.scene.category_list)
+        
+        # Update character list in cache
+        cache_service.cache_character_list(context.scene.character_list)
+        
+        context.area.tag_redraw()
+        
+        self.report({'INFO'}, f"Removed category '{category_name}' and its associated collections.")
         return {'FINISHED'}
 
-    # asks user for confirmation
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
 
@@ -463,7 +467,33 @@ class CHARACTER_PT_panel(Panel):
                     op.index = scene.character_list.find(character.name)
                     row.operator("character.remove_character", text="", icon='TRASH').index = scene.character_list.find(character.name)
 
+        # Add a separator before the Clear Everything button
+        layout.separator()
 
+        # Add the Clear Everything button at the bottom
+        layout.operator("quickspawn.clear_everything", text="Clear Everything", icon='TRASH')
+
+class QUICKSPAWN_OT_clear_everything(Operator):
+    bl_idname = "quickspawn.clear_everything"
+    bl_label = "Clear Everything"
+    bl_description = "Remove all categories and collections."
+
+    def execute(self, context):
+        # Clear all categories and characters from the scene
+        context.scene.category_list.clear()
+        context.scene.character_list.clear()
+
+        # Clear the cache file
+        CacheService().write_to_blender_cache({QUICKSPAWN_CATEGORYLIST: [], QUICKSPAWN_CHARACTERLIST: []})
+
+        # Force UI update
+        context.area.tag_redraw()
+
+        self.report({'INFO'}, "All categories and collections have been cleared.")
+        return {'FINISHED'}
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(self, event)
 
 # list of the classes to register
 classes = (
@@ -476,6 +506,7 @@ classes = (
     CHARACTER_OT_import_character,
     CHARACTER_PT_panel,
     CATEGORY_OT_toggle_expand,
+    QUICKSPAWN_OT_clear_everything,
 )
 # change between append and link
 def import_mode_update(self, context):
@@ -555,4 +586,3 @@ def load_quickspawn_data(dummy):
         character.category = char_data["category"]
 
     print(f"Final counts - Categories: {len(bpy.context.scene.category_list)}, Characters: {len(bpy.context.scene.character_list)}")
-
