@@ -50,7 +50,11 @@ class CacheService:
     def cache_category_list(self, category_list):
         cache = self.get_cache()
         cache[QUICKSPAWN_CATEGORYLIST] = [
-            {"name": category.name, "is_expanded": category.is_expanded}
+            {
+                "name": category.name,
+                "is_expanded": category.is_expanded,
+                "generate_override": category.generate_override
+            }
             for category in category_list
         ]
         self.write_to_blender_cache(cache)
@@ -88,9 +92,19 @@ class CacheService:
         return cache.get('quickspawn_import_mode', 'APPEND')  # append default
 
 # class containing relevant details for storing the category
+def update_generate_override(self, context):
+    CacheService().cache_category_list(context.scene.category_list)
+    context.area.tag_redraw()
+
 class CATEGORY_PG_category(PropertyGroup):
     name: StringProperty(name="Category Name")
     is_expanded: BoolProperty(default=True)
+    generate_override: BoolProperty(
+        name="Library Override on Link",
+        description="Leave this on for rigged characters. Disable if you're spawning unrigged meshes in this category.",
+        default=True,
+        update=update_generate_override
+    )
 
 # class containing relevant details for the character
 class CHARACTER_PG_character(PropertyGroup):
@@ -255,6 +269,7 @@ class CHARACTER_OT_import_character(Operator):
     
     def execute(self, context):
         character = context.scene.character_list[self.index]
+        category = next((cat for cat in context.scene.category_list if cat.name == character.category), None)
         
         initial_colls = set(bpy.data.collections)
         initial_texts = set(bpy.data.texts)
@@ -267,18 +282,20 @@ class CHARACTER_OT_import_character(Operator):
                 action = "Appended"
             except:
                 self.report({'ERROR'}, "Could not append collection")
+                return {'CANCELLED'}
         else:
             # User is linking given collection. Additionally, it's made a library override.
             try:
                 bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
-            except:
-                self.report({'ERROR'}, "Could not link collection")
-            try:
-                bpy.ops.object.make_override_library()
-            except:
-                self.report({'ERROR'}, "Could not make linked collection library override")
+                if category and category.generate_override:
+                    bpy.ops.object.make_override_library()
+            except Exception as e:
+                self.report({'ERROR'}, f"Error linking or making override: {str(e)}")
+                return {'CANCELLED'}
 
             action = "Linked"
+            if category and category.generate_override:
+                action += " and overridden"
         
         new_colls = set(bpy.data.collections) - initial_colls
         new_texts = set(bpy.data.texts) - initial_texts
@@ -352,7 +369,7 @@ class CHARACTER_OT_import_character(Operator):
                 if "_ui.py" in text.name:
                     if action_name == "Appended":
                         script_file = text
-                    elif action_name == "Linked":
+                    elif "overridden" in action_name:
                         new_text = bpy.data.texts.new(char_armature.name+"_ui.py")
                         new_text.write(text.as_string())
                         script_file = new_text
@@ -361,7 +378,7 @@ class CHARACTER_OT_import_character(Operator):
                     break
 
         # If linking duplicate characters, this is the case below. 
-        if len(texts) == 0 and action_name == "Linked" and char_armature:
+        if len(texts) == 0 and "overridden" in action_name and char_armature:
             try:
                 original_file = bpy.data.texts.get(char_armature.name.split(".")[0]+"_ui.py")
                 original_text = original_file.as_string()
@@ -418,7 +435,7 @@ class CATEGORY_OT_toggle_expand(Operator):
         category = context.scene.category_list[self.index]
         category.is_expanded = not category.is_expanded
 
-        # forgot to cache this, stays collapsed on blender relaunch
+        # Update the cache
         CacheService().cache_category_list(context.scene.category_list)
         return {'FINISHED'}
 
@@ -449,6 +466,7 @@ class CHARACTER_PT_panel(Panel):
             expand_ico = 'TRIA_DOWN' if category.is_expanded else 'TRIA_RIGHT'
             row.operator("category.toggle_expand", text="", icon=expand_ico, emboss=False).index = catNum
             row.label(text=category.name)
+            row.operator("category.settings", text="", icon='SETTINGS').index = catNum
             row.operator("category.remove_category", text="", icon='X').index = catNum
             
             if category.is_expanded:
@@ -467,10 +485,7 @@ class CHARACTER_PT_panel(Panel):
                     op.index = scene.character_list.find(character.name)
                     row.operator("character.remove_character", text="", icon='TRASH').index = scene.character_list.find(character.name)
 
-        # Add a separator before the Clear Everything button
         layout.separator()
-
-        # Add the Clear Everything button at the bottom
         layout.operator("quickspawn.clear_everything", text="Clear Everything", icon='TRASH')
 
 class QUICKSPAWN_OT_clear_everything(Operator):
@@ -495,6 +510,25 @@ class QUICKSPAWN_OT_clear_everything(Operator):
     def invoke(self, context, event):
         return context.window_manager.invoke_confirm(self, event)
 
+class CATEGORY_OT_settings(Operator):
+    bl_idname = "category.settings"
+    bl_label = "Category Settings"
+    bl_options = {'INTERNAL'}
+    bl_description = "Settings for this category."
+
+    index: IntProperty()
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_props_dialog(self)
+
+    def draw(self, context):
+        layout = self.layout
+        category = context.scene.category_list[self.index]
+        layout.prop(category, "generate_override")
+
+    def execute(self, context):
+        return {'FINISHED'}
+
 # list of the classes to register
 classes = (
     CATEGORY_PG_category,
@@ -506,6 +540,7 @@ classes = (
     CHARACTER_OT_import_character,
     CHARACTER_PT_panel,
     CATEGORY_OT_toggle_expand,
+    CATEGORY_OT_settings,
     QUICKSPAWN_OT_clear_everything,
 )
 # change between append and link
@@ -575,6 +610,7 @@ def load_quickspawn_data(dummy):
         category = bpy.context.scene.category_list.add()
         category.name = cat_data["name"]
         category.is_expanded = cat_data["is_expanded"]
+        category.generate_override = cat_data.get("generate_override", True)  # Default to True if not found
     
     # Load characters
     cached_characters = cache_service.get_cached_character_list()
