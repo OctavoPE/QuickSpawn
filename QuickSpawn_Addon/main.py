@@ -581,11 +581,20 @@ def register():
     if not cache_service.get_cache():
         # default empty stuff
         cache_service.write_to_blender_cache({QUICKSPAWN_CATEGORYLIST: [], QUICKSPAWN_CHARACTERLIST: []})
+        print("Cache created")
+
+    else:     # To read the cache, we need to restart blender, tell user to do so
+        def show_restart_message(self, context):
+            self.layout.label(text="QuickSpawn addon installed. Please restart Blender to finish setup.")
+        
+        bpy.context.window_manager.popup_menu(show_restart_message, title="Restart Required", icon='INFO')
 
     # Register load handler (only if not already registered)
     if load_quickspawn_data not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(load_quickspawn_data)
+        print("Load handler registered")
 
+    print("QuickSpawn addon registered")
 def unregister():
     print("Unregistering QuickSpawn addon")
     # Unregister load handler
