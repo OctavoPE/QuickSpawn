@@ -208,6 +208,11 @@ class CHARACTER_OT_add_character(Operator):
 
     def execute(self, context):
         # note do we want to allow dupe characters? assume characters coll names are unique
+
+        if self.filename in bpy.data.filepath and ".blend" in self.filename:
+            self.report({'ERROR'}, "Blender Limitation: Cannot add the current file as a library. It has to be done outside of the file.") # this appears to be a blender limitation
+            return {'CANCELLED'}
+
         if any(char.collection.lower() == self.filename.lower() and char.category == self.category 
                for char in context.scene.character_list):
             self.report({'ERROR'}, f"Collection '{self.filename}' already exists in category '{self.category}'.")
@@ -280,17 +285,22 @@ class CHARACTER_OT_import_character(Operator):
             try:
                 bpy.ops.wm.append(filename=character.collection, directory=character.filepath)   
                 action = "Appended"
-            except:
-                self.report({'ERROR'}, "Could not append collection")
+            except Exception as e:
+                self.report({'ERROR'}, f"Could not append collection: {str(e)}")
                 return {'CANCELLED'}
         else:
             # User is linking given collection. Additionally, it's made a library override.
             try:
                 bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
+            except Exception as e:
+                self.report({'ERROR'}, f"Error linking collection. It may contain datablocks that are not overridable and thus duplicate. Output: {str(e)}")
+                return {'CANCELLED'}
+            
+            try:
                 if category and category.generate_override:
                     bpy.ops.object.make_override_library()
             except Exception as e:
-                self.report({'ERROR'}, f"Error linking or making override: {str(e)}")
+                self.report({'ERROR'}, f"Error making override: {str(e)}")
                 return {'CANCELLED'}
 
             action = "Linked"
