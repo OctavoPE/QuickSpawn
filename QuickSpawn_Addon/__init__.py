@@ -280,6 +280,7 @@ class CHARACTER_OT_import_character(Operator):
         initial_texts = set(bpy.data.texts)
         initial_armatures = set(bpy.data.armatures)
         
+        
         if context.scene.quickspawn_import_mode == 'APPEND':
             # User is appending given collection
             try:
@@ -290,6 +291,7 @@ class CHARACTER_OT_import_character(Operator):
                 return {'CANCELLED'}
         else:
             # User is linking given collection. Additionally, it's made a library override.
+            initial_objs = set(bpy.data.objects)
             try:
                 bpy.ops.wm.link(filename=character.collection, directory=character.filepath)
             except Exception as e:
@@ -298,18 +300,39 @@ class CHARACTER_OT_import_character(Operator):
             
             try:
                 if category and category.generate_override:
+                    # LIB OVERRIDE on what's been LINKED.
                     bpy.ops.object.make_override_library()
+
+                    # LIB OVERRIDE: LIGHT DIRECTION
+                    for obj in bpy.context.view_layer.objects:
+                        if "Light Direction" in obj.name and obj not in initial_objs:
+                            for o in bpy.context.selected_objects:
+                                o.select_set(False) 
+                            obj.select_set(True)
+                            bpy.context.view_layer.objects.active = obj
+                            bpy.ops.object.make_override_library()
+                            obj.select_set(False)
+                            break
+
+                    # Reselect char rig for convenience.
+                    for obj in bpy.context.view_layer.objects:
+                        if "Rig" in obj.name and obj not in initial_objs:
+                            obj.select_set(True)
+                            bpy.context.view_layer.objects.active = obj
+                            break
+                    
             except Exception as e:
                 self.report({'ERROR'}, f"Error making override: {str(e)}")
                 return {'CANCELLED'}
-
+            
             action = "Linked"
             if category and category.generate_override:
                 action += " and overridden"
         
         new_colls = set(bpy.data.collections) - initial_colls
         new_texts = set(bpy.data.texts) - initial_texts
-        new_armatures = set(bpy.data.armatures) - initial_armatures       
+        new_armatures = set(bpy.data.armatures) - initial_armatures
+           
         
         is_character = False
         rig_object = None
